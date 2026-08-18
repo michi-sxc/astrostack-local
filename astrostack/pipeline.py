@@ -52,9 +52,9 @@ def _match_exposure(
         ref_lum = luminance(reference) if reference_luminance is None else reference_luminance
         reference_sample = ref_lum[::stride, ::stride][valid[::stride, ::stride]]
     cur_sample = cur_lum[::stride, ::stride][valid[::stride, ::stride]]
-    if len(ref_sample) < 100:
+    if len(reference_sample) < 100:
         return frame
-    ref_low, ref_high = np.percentile(ref_sample, (20.0, 92.0))
+    ref_low, ref_high = np.percentile(reference_sample, (20.0, 92.0))
     cur_low, cur_high = np.percentile(cur_sample, (20.0, 92.0))
     gain = np.clip((ref_high - ref_low) / max(float(cur_high - cur_low), 1e-6), 0.55, 1.8)
     return np.maximum((frame - float(cur_low)) * gain + float(ref_low), 0.0).astype(np.float32)

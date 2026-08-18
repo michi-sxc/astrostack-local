@@ -72,10 +72,16 @@ mask_item = json.loads(web_mask_json)
 mask = None if mask_item is None else _load(mask_item)[..., 0]
 
 def _progress(stage, current, total):
-    emit_progress(stage, current, total)
+    try:
+        emit_progress(stage, current, total)
+    except Exception:
+        pass
 
 def _log(message):
-    emit_log(message)
+    try:
+        emit_log(message)
+    except Exception:
+        pass
 
 result = stack_decoded_frames(lights, darks, mask, json.loads(web_settings_json), _progress, _log)
 result.image.astype(np.float32).tofile('/tmp/astrostack-result.f32')

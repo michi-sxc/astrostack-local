@@ -19,7 +19,7 @@ async function runtime() {
       await pyodide.loadPackage(['scipy', 'opencv-python']);
       pyodide.FS.mkdirTree('/astrostack');
       for (const name of PY_FILES) {
-        const response = await fetch(new URL(`./pycore/astrostack/${name}`, import.meta.url));
+        const response = await fetch(new URL(`./pycore/astrostack/${name}?v=310bde9`, import.meta.url));
         if (!response.ok) throw new Error(`Could not load Python module ${name}`);
         pyodide.FS.writeFile(`/astrostack/${name}`, await response.text());
       }

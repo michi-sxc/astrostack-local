@@ -450,7 +450,7 @@ let pythonWorker = null;
 
 function ensurePythonWorker() {
   if (pythonWorker) return pythonWorker;
-  pythonWorker = new Worker(new URL('./python_worker.js?v=stream311', import.meta.url), { type: 'module' });
+  pythonWorker = new Worker(new URL('./python_worker.js?v=stream312', import.meta.url), { type: 'module' });
   return pythonWorker;
 }
 
@@ -521,9 +521,13 @@ async function run(job) {
   const ordered = [...lights.keys()]
     .filter((index) => index !== referenceIndex)
     .sort((a, b) => Math.abs(a - referenceIndex) - Math.abs(b - referenceIndex));
+  let pending = null;
   for (let done = 0; done < ordered.length; done++) {
     const index = ordered[done];
-    const frame = await decode(lights[index], maxSide, target);
+    // Decode the next RAW while Pyodide registers the current one.
+    const framePromise = pending || decode(lights[index], maxSide, target);
+    pending = done + 1 < ordered.length ? decode(lights[ordered[done + 1]], maxSide, target) : null;
+    const frame = await framePromise;
     const packed = packFrame(frame);
     frame.data = null;
     await pythonRequest(child, {
@@ -534,9 +538,12 @@ async function run(job) {
   }
   const firstPass = await pythonRequest(child, { type: 'streamFirstDone' }, [], ['streamFirstReady']);
   const probeIndices = firstPass.indices || [];
+  pending = null;
   for (let done = 0; done < probeIndices.length; done++) {
     const index = probeIndices[done];
-    const frame = await decode(lights[index], maxSide, target);
+    const framePromise = pending || decode(lights[index], maxSide, target);
+    pending = done + 1 < probeIndices.length ? decode(lights[probeIndices[done + 1]], maxSide, target) : null;
+    const frame = await framePromise;
     const packed = packFrame(frame);
     frame.data = null;
     await pythonRequest(child, {
@@ -546,10 +553,14 @@ async function run(job) {
   }
   await pythonRequest(child, { type: 'streamProbeDone' });
   const accepted = firstPass.accepted || [];
+  pending = null;
   for (let done = 0; done < accepted.length; done++) {
     const index = accepted[done];
     if (index === referenceIndex) continue;
-    const frame = await decode(lights[index], maxSide, target);
+    const nextAccepted = accepted.slice(done + 1).find((candidate) => candidate !== referenceIndex);
+    const framePromise = pending || decode(lights[index], maxSide, target);
+    pending = nextAccepted === undefined ? null : decode(lights[nextAccepted], maxSide, target);
+    const frame = await framePromise;
     const packed = packFrame(frame);
     frame.data = null;
     await pythonRequest(child, {

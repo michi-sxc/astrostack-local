@@ -144,7 +144,7 @@ function appendLog(message) { log(message); }
 
 function ensureWorker() {
   if (!state.worker) {
-    state.worker = new Worker('./worker.js?v=stream311', { type: 'module' });
+    state.worker = new Worker('./worker.js?v=stream312', { type: 'module' });
     state.worker.onmessage = handleWorkerMessage;
     state.worker.onerror = (event) => {
       state.running = false;

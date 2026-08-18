@@ -8,7 +8,7 @@ from typing import Callable, Sequence
 import cv2
 import numpy as np
 
-from .alignment import SpatialTransform, estimate_transform, luminance, warp_frame
+from .alignment import SpatialTransform, estimate_transform, luminance, prepare_reference, registration_confidence, warp_frame
 from .calibration import build_master_dark, calibrate
 from .models import AlignmentStats, ProcessingOptions, StackMode, StackRequest, StackResult
 from .pipeline import (
@@ -50,6 +50,7 @@ class StreamingStackSession:
         self.reference_path = self.light_paths[reference_index]
         self.reference_index = reference_index
         self.reference = np.asarray(reference, dtype=np.float32)
+        self.reference_luminance = luminance(self.reference)
         self.size = (self.reference.shape[1], self.reference.shape[0])
         frame_data = {path: frame for path, frame in zip(self.dark_paths, darks)}
         frame_data[self.reference_path] = self.reference
@@ -76,6 +77,7 @@ class StreamingStackSession:
         self.foreground = None if mask is None else np.asarray(mask, dtype=np.float32)
         self.auto_foreground = options.protect_foreground and mask is None
         self.normalization_mask = self.foreground
+        self.reference_field = prepare_reference(self.reference, options.max_alignment_side, self.normalization_mask)
         self.source_validity = np.ones(self.reference.shape[:2], np.float32)
         self.robust_sky = options.mode in {StackMode.SIGMA_CLIPPED, StackMode.SUM}
         self.accumulator = (
@@ -92,6 +94,7 @@ class StreamingStackSession:
         self.rejected: dict[Path, str] = {}
         self.alignment: dict[Path, AlignmentStats] = {self.reference_path: AlignmentStats()}
         self.transforms: dict[Path, SpatialTransform] = {self.reference_path: SpatialTransform(np.eye(3, dtype=np.float64))}
+        self.frame_confidence: dict[Path, float] = {self.reference_path: 1.0}
         self.sky_mean = self.sky_deviation = self.sky_target = None
         self.foreground_mean = self.foreground_deviation = self.foreground_target = None
         self.base_stack = None
@@ -114,30 +117,32 @@ class StreamingStackSession:
         self._progress("Aligning and stacking", len(self.accepted), len(self.light_paths) - 1)
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, self.reference_luminance)
             transform, stats = estimate_transform(
                 prepared,
                 self.reference,
                 self.options.max_alignment_side,
                 self.normalization_mask,
                 self.options.correct_distortion,
+                self.reference_field,
             )
             if stats.rms > 1.15:
                 raise ValueError(f"star residual too high ({stats.rms:.2f} px)")
-            if abs(stats.rotation_degrees) > 1.35:
-                raise ValueError(f"rotation span too large ({stats.rotation_degrees:+.2f} deg)")
-            if stats.p90 > 0.42 or stats.edge_p90 > 0.48:
-                raise ValueError(f"registration residual too high ({stats.p90:.2f}/{stats.edge_p90:.2f} px)")
+            # rotation is expected for an untracked camera; estimate_transform
+            # already rejects transforms whose field residuals are unsafe
             if not 0.95 <= stats.scale <= 1.05:
                 raise ValueError(f"implausible frame scale ({stats.scale:.3f})")
             aligned, validity = warp_frame(prepared, transform, self.size, self.source_validity)
+            confidence = registration_confidence(stats)
+            validity *= confidence
             self.accumulator.add(aligned, validity)
             if self.foreground_moments is not None:
                 self.foreground_moments.add(prepared, self.source_validity)
-            self.geometric_coverage += _geometric_coverage(transform, prepared.shape[:2], self.size)
+            self.geometric_coverage += _geometric_coverage(transform, prepared.shape[:2], self.size) * confidence
             self.accepted.append(path)
             self.alignment[path] = stats
             self.transforms[path] = transform
+            self.frame_confidence[path] = confidence
             self._log(
                 f"Accepted {path.name}: {stats.inliers} verified stars over {stats.field_coverage:.0%} of field, "
                 f"{stats.rotation_degrees:+.2f} deg, rms {stats.rms:.2f} px, p90 {stats.p90:.2f} px, "
@@ -184,7 +189,7 @@ class StreamingStackSession:
             return
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, None)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, None, self.reference_luminance)
             aligned, _ = warp_frame(prepared, self.transforms[path], self.size)
             self.probe_candidates.append(estimate_foreground_mask(self.reference, prepared, aligned))
         finally:
@@ -221,8 +226,9 @@ class StreamingStackSession:
             return
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, self.reference_luminance)
             aligned, validity = warp_frame(prepared, self.transforms[path], self.size, self.source_validity)
+            validity *= self.frame_confidence[path]
             if self.sky_clipped is not None:
                 self.sky_clipped.add(aligned, validity)
             if self.foreground_clipped is not None:

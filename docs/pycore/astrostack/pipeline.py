@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .alignment import SpatialTransform, estimate_transform, luminance, warp_frame, warp_mask
+from .alignment import SpatialTransform, estimate_transform, luminance, prepare_reference, registration_confidence, warp_frame, warp_mask
 from .calibration import build_master_dark, calibrate
 from .io import acquisition_sort_key, read_linear_rgb, read_mask
 from .models import AlignmentStats, StackMode, StackRequest, StackResult
@@ -37,8 +37,13 @@ def _read_source(path: Path, request: StackRequest) -> np.ndarray:
     return read_linear_rgb(path, request.options.half_size)
 
 
-def _match_exposure(frame: np.ndarray, reference: np.ndarray, foreground: np.ndarray | None) -> np.ndarray:
-    ref_lum = luminance(reference)
+def _match_exposure(
+    frame: np.ndarray,
+    reference: np.ndarray,
+    foreground: np.ndarray | None,
+    reference_luminance: np.ndarray | None = None,
+) -> np.ndarray:
+    ref_lum = luminance(reference) if reference_luminance is None else reference_luminance
     cur_lum = luminance(frame)
     valid = np.ones(ref_lum.shape, bool) if foreground is None else foreground < 0.25
     # Sparse sampling is plenty for robust photometric normalization.
@@ -53,11 +58,19 @@ def _match_exposure(frame: np.ndarray, reference: np.ndarray, foreground: np.nda
     return np.maximum((frame - float(cur_low)) * gain + float(ref_low), 0.0).astype(np.float32)
 
 
-def _prepare_frame(path: Path, request: StackRequest, reference: np.ndarray, calibration, size: tuple[int, int], foreground: np.ndarray | None) -> np.ndarray:
+def _prepare_frame(
+    path: Path,
+    request: StackRequest,
+    reference: np.ndarray,
+    calibration,
+    size: tuple[int, int],
+    foreground: np.ndarray | None,
+    reference_luminance: np.ndarray | None = None,
+) -> np.ndarray:
     frame = _read_source(path, request)
     if frame.shape != reference.shape:
         frame = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-    return _match_exposure(calibrate(frame, calibration), reference, foreground)
+    return _match_exposure(calibrate(frame, calibration), reference, foreground, reference_luminance)
 
 
 def _geometric_coverage(transform: SpatialTransform, source_shape: tuple[int, int], size: tuple[int, int]) -> np.ndarray:
@@ -143,6 +156,7 @@ def stack_images(request: StackRequest) -> StackResult:
     size = reference.shape[1], reference.shape[0]
     calibration = build_master_dark(darks, request.options.half_size, size, request.progress, request.frame_data)
     reference = calibrate(reference, calibration)
+    reference_luminance = luminance(reference)
     if calibration.dark_count:
         strategy = "dark subtraction and bad-pixel repair" if calibration.master_dark is not None else "bad-pixel repair"
         _log(request, f"Calibration: {strategy} from {calibration.dark_count} dark frame(s); chroma floor {calibration.dark_noise:.5f}")
@@ -156,6 +170,7 @@ def stack_images(request: StackRequest) -> StackResult:
         else:
             _log(request, "Foreground protection: temporal automatic mask")
     normalization_mask = foreground
+    reference_field = prepare_reference(reference, request.options.max_alignment_side, normalization_mask)
 
     # Keep a complete sky estimate behind the foreground; alpha errors then reveal sky, not black holes.
     source_validity = np.ones(reference.shape[:2], np.float32)
@@ -171,6 +186,7 @@ def stack_images(request: StackRequest) -> StackResult:
     rejected: dict[Path, str] = {}
     alignments: dict[Path, AlignmentStats] = {reference_path: AlignmentStats(stars=0, matches=0, inliers=0)}
     transforms: dict[Path, SpatialTransform] = {reference_path: SpatialTransform(np.eye(3, dtype=np.float64))}
+    frame_confidence: dict[Path, float] = {reference_path: 1.0}
 
     # Nearest frames bootstrap robust statistics before drift/outliers reach the stack.
     ordered = sorted(
@@ -180,31 +196,32 @@ def stack_images(request: StackRequest) -> StackResult:
     for completed, (_, path) in enumerate(ordered, 1):
         _notify(request, "Aligning and stacking", completed, len(ordered))
         try:
-            frame = _prepare_frame(path, request, reference, calibration, size, normalization_mask)
+            frame = _prepare_frame(path, request, reference, calibration, size, normalization_mask, reference_luminance)
             transform, stats = estimate_transform(
                 frame,
                 reference,
                 request.options.max_alignment_side,
                 normalization_mask,
                 request.options.correct_distortion,
+                reference_field,
             )
             if stats.rms > 1.15:
                 raise ValueError(f"star residual too high ({stats.rms:.2f} px)")
-            # long rotations amplify lens residuals and camera drift at the edge
-            if abs(stats.rotation_degrees) > 1.35:
-                raise ValueError(f"rotation span too large ({stats.rotation_degrees:+.2f} deg)")
-            if stats.p90 > 0.42 or stats.edge_p90 > 0.48:
-                raise ValueError(f"registration residual too high ({stats.p90:.2f}/{stats.edge_p90:.2f} px)")
+            # rotation is expected for an untracked camera; estimate_transform
+            # already rejects transforms whose field residuals are unsafe
             if not 0.95 <= stats.scale <= 1.05:
                 raise ValueError(f"implausible frame scale ({stats.scale:.3f})")
             aligned, validity = warp_frame(frame, transform, size, source_validity)
+            confidence = registration_confidence(stats)
+            validity *= confidence
             accumulator.add(aligned, validity)
             if foreground_moments is not None:
                 foreground_moments.add(frame, source_validity)
-            geometric_coverage += _geometric_coverage(transform, frame.shape[:2], size)
+            geometric_coverage += _geometric_coverage(transform, frame.shape[:2], size) * confidence
             accepted.append(path)
             alignments[path] = stats
             transforms[path] = transform
+            frame_confidence[path] = confidence
             _log(
                 request,
                 f"Accepted {path.name}: {stats.inliers} verified stars over {stats.field_coverage:.0%} of field, "
@@ -263,9 +280,10 @@ def stack_images(request: StackRequest) -> StackResult:
     if sky_clipped is not None or foreground_clipped is not None:
         for completed, path in enumerate(accepted, 1):
             _notify(request, "Robust rejection pass", completed, len(accepted))
-            frame = reference if path == reference_path else _prepare_frame(path, request, reference, calibration, size, normalization_mask)
+            frame = reference if path == reference_path else _prepare_frame(path, request, reference, calibration, size, normalization_mask, reference_luminance)
             if sky_clipped is not None:
                 aligned, validity = warp_frame(frame, transforms[path], size, source_validity)
+                validity *= frame_confidence[path]
                 sky_clipped.add(aligned, validity)
             if foreground_clipped is not None:
                 # Stars move here, so the second pass rejects them from the camera-fixed layer.

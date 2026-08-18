@@ -19,6 +19,15 @@ class StarField:
 
 
 @dataclass(slots=True)
+class AlignmentReference:
+    """Reference detections reused for every light in a sequence."""
+
+    coarse: StarField
+    fine: StarField
+    max_side: int
+
+
+@dataclass(slots=True)
 class SpatialTransform:
     matrix: np.ndarray
     # smooth source-space residual, fixes lens distortion left after homography
@@ -89,6 +98,25 @@ def detect_stars(
     return StarField(refined, detail.shape, scale, detail)
 
 
+def prepare_reference(
+    image: np.ndarray,
+    max_side: int = 4096,
+    exclude_mask: np.ndarray | None = None,
+) -> AlignmentReference:
+    coarse_side = min(max_side, 1200)
+    coarse = detect_stars(image, coarse_side, exclude_mask, max_stars=700)
+    fine = coarse if max_side <= coarse_side else detect_stars(image, max_side, exclude_mask, max_stars=2000)
+    return AlignmentReference(coarse, fine, max_side)
+
+
+def registration_confidence(stats: AlignmentStats) -> float:
+    """Soft weight for usable but less-covered edge frames."""
+    residual = np.clip((0.82 - stats.p90) / 0.42, 0.0, 1.0)
+    edge = np.clip((0.92 - stats.edge_p90) / 0.42, 0.0, 1.0)
+    field = np.clip((stats.field_coverage - 0.35) / 0.35, 0.0, 1.0)
+    return float(max(0.35, min(residual, edge, field)))
+
+
 def _mutual_matches(
     current: np.ndarray,
     reference: np.ndarray,
@@ -111,28 +139,23 @@ def _triangle_features(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     except Exception:
         return np.empty((0, 2), np.float32), np.empty((0, 3), np.int32)
 
-    descriptors: list[tuple[float, float]] = []
-    canonical: list[np.ndarray] = []
-    for triangle in triangles:
-        vertices = points[triangle]
-        opposite = np.array(
-            (
-                np.linalg.norm(vertices[1] - vertices[2]),
-                np.linalg.norm(vertices[0] - vertices[2]),
-                np.linalg.norm(vertices[0] - vertices[1]),
-            ),
-            np.float32,
-        )
-        longest = float(opposite.max())
-        if longest < 8.0 or longest > min(350.0, float(np.max(np.ptp(points, axis=0))) * 0.35):
-            continue
-        ordered_sides = np.sort(opposite)
-        if ordered_sides[0] / longest < 0.12:
-            continue
-        descriptors.append((float(ordered_sides[0] / longest), float(ordered_sides[1] / longest)))
-        # Opposite-side ordering maps the same physical vertex across rotation/scale.
-        canonical.append(triangle[np.argsort(opposite)])
-    return np.asarray(descriptors, np.float32), np.asarray(canonical, np.int32)
+    vertices = points[triangles]
+    opposite = np.stack(
+        (
+            np.linalg.norm(vertices[:, 1] - vertices[:, 2], axis=1),
+            np.linalg.norm(vertices[:, 0] - vertices[:, 2], axis=1),
+            np.linalg.norm(vertices[:, 0] - vertices[:, 1], axis=1),
+        ),
+        axis=1,
+    )
+    longest = opposite.max(axis=1)
+    ordered_sides = np.sort(opposite, axis=1)
+    limit = min(350.0, float(np.max(np.ptp(points, axis=0))) * 0.35)
+    keep = (longest >= 8.0) & (longest <= limit) & (ordered_sides[:, 0] / np.maximum(longest, 1e-6) >= 0.12)
+    descriptors = (ordered_sides[keep, :2] / longest[keep, None]).astype(np.float32)
+    # Opposite-side ordering maps the same physical vertex across rotation/scale.
+    canonical = np.take_along_axis(triangles, np.argsort(opposite, axis=1), axis=1)[keep]
+    return descriptors, canonical.astype(np.int32, copy=False)
 
 
 def _triangle_correspondences(current: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
@@ -266,11 +289,13 @@ def estimate_transform(
     max_side: int = 4096,
     exclude_mask: np.ndarray | None = None,
     correct_distortion: bool = True,
+    reference_field: AlignmentReference | None = None,
 ) -> tuple[SpatialTransform, AlignmentStats]:
     # coarse pass ignores RAW defects, native pass adds precision
     coarse_side = min(max_side, 1200)
     current = detect_stars(current_image, coarse_side, exclude_mask, max_stars=700)
-    reference = detect_stars(reference_image, coarse_side, exclude_mask, max_stars=700)
+    cached = reference_field if reference_field is not None and reference_field.max_side == max_side else None
+    reference = cached.coarse if cached is not None else detect_stars(reference_image, coarse_side, exclude_mask, max_stars=700)
     stats = AlignmentStats(stars=len(current.points))
     src, dst, triangle_matches = _triangle_correspondences(current.points, reference.points)
 
@@ -304,7 +329,7 @@ def estimate_transform(
 
     if max_side > coarse_side:
         fine_current = detect_stars(current_image, max_side, exclude_mask, max_stars=2000)
-        fine_reference = detect_stars(reference_image, max_side, exclude_mask, max_stars=2000)
+        fine_reference = cached.fine if cached is not None else detect_stars(reference_image, max_side, exclude_mask, max_stars=2000)
         ratio = fine_current.scale / current.scale
         scale_up = np.diag((ratio, ratio, 1.0))
         matrix_small = scale_up @ matrix_small @ np.linalg.inv(scale_up)
@@ -350,12 +375,12 @@ def estimate_transform(
     stats.edge_p90 = float(np.percentile(residual[edge], 90.0) / current.scale) if edge.sum() >= 8 else stats.p90
     hull = cv2.convexHull(quality_dst.astype(np.float32))
     stats.field_coverage = float(cv2.contourArea(hull) / max(current.shape[0] * current.shape[1], 1))
-    if stats.field_coverage < 0.50:
+    if stats.field_coverage < 0.35:
         raise ValueError(f"star matches cover too little of the frame ({stats.field_coverage:.0%})")
     # keep only frames that stay tight across the whole field
-    if stats.p90 > 0.50:
+    if stats.p90 > 0.82:
         raise ValueError(f"outer-field star residual too high ({stats.p90:.2f} px)")
-    if stats.edge_p90 > 0.60:
+    if stats.edge_p90 > 0.92:
         raise ValueError(f"edge star residual too high ({stats.edge_p90:.2f} px)")
 
     scale_matrix = np.diag((current.scale, current.scale, 1.0))

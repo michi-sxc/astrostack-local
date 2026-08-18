@@ -134,7 +134,7 @@ function resetFinish() {
 function updateMemoryHint() {
   const mode = $('resolution').value;
   $('memoryHint').textContent = mode === 'full'
-    ? 'Native mode keeps source dimensions. The validated Python/OpenCV engine loads on first run; use Mobile-safe if the browser warns about memory.'
+    ? 'Native mode keeps source dimensions for small sets. Large sets are automatically capped in-browser to protect phone memory.'
     : mode === 'mobile'
       ? 'Mobile-safe caps the long edge at 1800 px while keeping the full processing pipeline.'
       : 'Quick preview caps the long edge at 1100 px for fast tuning before a native export.';

@@ -35,7 +35,8 @@ function writeFrames(pyodide, entries, prefix, channels = 3) {
   entries.forEach((entry, index) => {
     const path = `/tmp/${prefix}-${index}.f32`;
     pyodide.FS.writeFile(path, new Uint8Array(entry.buffer));
-    paths.push({ path, w: entry.w, h: entry.h, channels });
+    entry.buffer = null;
+    paths.push({ path, w: entry.w, h: entry.h, channels, dtype: entry.dtype || 'float32' });
   });
   return paths;
 }
@@ -59,17 +60,9 @@ async function process(job) {
 
   await pyodide.runPythonAsync(`
 import json
-import numpy as np
-from astrostack.web import stack_decoded_frames
+from astrostack.web import stack_decoded_sources
 
-def _load(item):
-    shape = (int(item['h']), int(item['w']), int(item['channels']))
-    return np.fromfile(item['path'], dtype=np.float32).reshape(shape)
-
-lights = [_load(item) for item in json.loads(web_lights_json)]
-darks = [_load(item) for item in json.loads(web_darks_json)]
 mask_item = json.loads(web_mask_json)
-mask = None if mask_item is None else _load(mask_item)[..., 0]
 
 def _progress(stage, current, total):
     try:
@@ -83,7 +76,14 @@ def _log(message):
     except Exception:
         pass
 
-result = stack_decoded_frames(lights, darks, mask, json.loads(web_settings_json), _progress, _log)
+result = stack_decoded_sources(
+    json.loads(web_lights_json),
+    json.loads(web_darks_json),
+    mask_item,
+    json.loads(web_settings_json),
+    _progress,
+    _log,
+)
 result.image.astype(np.float32).tofile('/tmp/astrostack-result.f32')
 with open('/tmp/astrostack-result.json', 'w', encoding='utf-8') as handle:
     json.dump({'width': int(result.image.shape[1]), 'height': int(result.image.shape[0])}, handle)
@@ -100,6 +100,10 @@ self.onmessage = async (event) => {
   try {
     await process(event.data);
   } catch (error) {
-    send({ type: 'error', message: error?.message || String(error) });
+    const detail = error?.message || String(error);
+    const message = /ArrayMemoryError|Unable to allocate|out of memory/i.test(detail)
+      ? 'The browser ran out of working memory. Choose Mobile-safe or Quick preview, then run the stack again.'
+      : detail;
+    send({ type: 'error', message });
   }
 };

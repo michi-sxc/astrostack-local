@@ -423,6 +423,13 @@ function toOutput(data) {
   return out;
 }
 
+function packFrame(frame) {
+  // LibRaw already delivered 16-bit values; this is lossless and halves the handoff memory.
+  const data = new Uint16Array(frame.data.length);
+  for (let index = 0; index < data.length; index++) data[index] = Math.round(clamp(frame.data[index]) * 65535);
+  return { w: frame.w, h: frame.h, data };
+}
+
 function cropByCoverage(data, w, h, count, required) {
   if (required <= 1) return { data, w, h, cropped: false };
   let left = w, top = h, right = -1, bottom = -1;
@@ -450,18 +457,34 @@ function ensurePythonWorker() {
 async function run(job) {
   const options = job.settings || {};
   const maxSide = options.resolution === 'mobile' ? 1800 : options.resolution === 'preview' ? 1100 : 0;
+  let workingSide = maxSide;
+  if (!workingSide && job.lights.length > 8) {
+    workingSide = job.lights.length > 20 ? 1100 : 1800;
+    note(`Native resolution is too large for this browser frame count; using a ${workingSide}px working set to avoid exhausting memory.`);
+  }
   progress('Decoding light frames', 3);
-  const first = await decode(job.lights[0], maxSide);
+  const first = await decode(job.lights[0], workingSide);
   const target = { w: first.w, h: first.h };
-  const lights = [first];
+  const lights = [packFrame(first)];
+  first.data = null;
   for (let i = 1; i < job.lights.length; i++) {
-    lights.push(await decode(job.lights[i], maxSide, target));
+    const frame = await decode(job.lights[i], workingSide, target);
+    lights.push(packFrame(frame));
+    frame.data = null;
     progress(`Decoding light ${i + 1}/${job.lights.length}`, 3 + (i / job.lights.length) * 12);
   }
   const darks = [];
-  for (const file of job.darks || []) darks.push(await decode(file, maxSide, target));
+  for (const file of job.darks || []) {
+    const frame = await decode(file, workingSide, target);
+    darks.push(packFrame(frame));
+    frame.data = null;
+  }
   let mask = null;
-  if (job.mask) mask = await decode(job.mask, maxSide, target, true);
+  if (job.mask) {
+    const decodedMask = await decode(job.mask, workingSide, target, true);
+    mask = packFrame(decodedMask);
+    decodedMask.data = null;
+  }
   note(`${lights.length} light frame${lights.length === 1 ? '' : 's'} decoded at ${target.w} × ${target.h}.`);
   const rawCount = job.lights.filter((file) => RAW_EXT.test(file.name)).length;
   if (rawCount) note(`${rawCount} RAW frame${rawCount === 1 ? '' : 's'} decoded locally with LibRaw at 16-bit, linear tone.`);
@@ -469,9 +492,9 @@ async function run(job) {
   const payload = {
     type: 'processDecoded',
     settings: options,
-    lights: lights.map((frame) => ({ w: frame.w, h: frame.h, buffer: frame.data.buffer })),
-    darks: darks.map((frame) => ({ w: frame.w, h: frame.h, buffer: frame.data.buffer })),
-    mask: mask ? { w: mask.w, h: mask.h, buffer: mask.data.buffer } : null,
+    lights: lights.map((frame) => ({ w: frame.w, h: frame.h, dtype: 'uint16', buffer: frame.data.buffer })),
+    darks: darks.map((frame) => ({ w: frame.w, h: frame.h, dtype: 'uint16', buffer: frame.data.buffer })),
+    mask: mask ? { w: mask.w, h: mask.h, channels: 1, dtype: 'uint16', buffer: mask.data.buffer } : null,
   };
   const transfer = [...payload.lights, ...payload.darks, ...(payload.mask ? [payload.mask] : [])].map((item) => item.buffer);
   const child = ensurePythonWorker();

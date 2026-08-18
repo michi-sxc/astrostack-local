@@ -10,4 +10,4 @@ Set **Settings → Pages → Deploy from a branch**, choose the repository's def
 
 ## Input note
 
-RAW/DNG/CR2/NEF/ARW-family files are decoded locally with LibRaw WASM. The decoder demosaics to 16-bit RGB with camera white balance, no automatic brightness, and a linear tone curve before the stacker applies its own finishing controls. Large RAW sets can use substantial phone memory; Mobile-safe or Quick preview reduces the working dimensions after decoding, without requiring a pre-converted file.
+RAW/DNG/CR2/NEF/ARW-family files are decoded locally with LibRaw WASM. The decoder demosaics to 16-bit RGB with camera white balance, no automatic brightness, and a linear tone curve before the stacker applies its own finishing controls. Large RAW sets can use substantial phone memory; Mobile-safe or Quick preview reduces the working dimensions after decoding, without requiring a pre-converted file. Native mode is automatically bounded for very large frame sets so the Python worker does not materialize an impossible full-resolution frame cube.

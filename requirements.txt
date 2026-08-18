@@ -1,0 +1,5 @@
+numpy>=2.0,<3
+opencv-python-headless>=4.10,<6
+pillow>=10,<13
+rawpy>=0.24,<1
+scipy>=1.14,<2

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# private/generated capture data and oversized binaries
+output/
+test-dataset/
+raw_vendor_tmp/
+Eagle Images Stacker.apk
+resources/assets/model.tflite

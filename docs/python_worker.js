@@ -14,7 +14,7 @@ function send(message, transfer = []) { self.postMessage(message, transfer); }
 async function runtime() {
   if (!runtimePromise) {
     runtimePromise = (async () => {
-      send({ type: 'log', message: 'Loading Python stacker and OpenCV in the browser (first run downloads the local runtime).' });
+      send({ type: 'log', message: 'Loading the Python/OpenCV runtime. The first run downloads it to the browser cache.' });
       const pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
       await pyodide.loadPackage(['scipy', 'opencv-python']);
       pyodide.FS.mkdirTree('/astrostack');

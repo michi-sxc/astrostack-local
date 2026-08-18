@@ -1,34 +1,30 @@
-# AstroStack Studio
+# AstroStack
 
-A clean, runnable astrophotography stacker built from the supplied DNG workflow. The files in `sources/` are decompiler output, not a buildable Android project, so this implementation is independent and intentionally keeps the processing core separate from the desktop UI.
+AstroStack is a local astrophotography stacker. The Python package provides the processing pipeline and a Windows GUI. The `docs/` folder contains the browser build for GitHub Pages.
 
-## Run the app
+## Desktop app
 
-Double-click `run_astrostack.bat`.
+Run `run_astrostack.bat`. The first run creates `.venv` and installs the dependencies.
 
-The launcher creates `.venv` and installs the four dependencies on its first run. In the window:
+1. Select light frames and optional dark frames.
+2. Choose a stacking mode. Sigma is the default; Sum and Average are also available.
+3. Select a foreground mask if the frame contains trees, buildings, or another fixed object. White marks foreground and black marks sky.
+4. Choose an output path and start the stack.
 
-1. Choose all light frames and optional dark frames.
-2. Keep **Sigma** selected for the best default result.
-3. Leave the fast half-resolution preview disabled for the full RAW resolution.
-4. Optionally choose a foreground mask, then choose a TIFF output and click **Stack images**. The stack is written immediately; **Save current result** re-exports the last completed stack if you change the destination.
+TIFF and PNG output use 16-bit precision. The stack also writes a `_coverage.png` map showing how many aligned samples contributed to each pixel.
 
-TIFF and PNG are written at 16-bit precision. The app also writes a `_coverage.png` map; brighter pixels received more aligned samples.
+## Processing
 
-## What changed
+- Per-pixel coverage normalization prevents drifting edges from being divided by missing samples.
+- A middle frame is used as the registration reference to reduce total drift.
+- Coarse star matching is followed by native-resolution subpixel refinement.
+- Registration quality, spatial coverage, edge residuals, and transform scale are checked per frame.
+- Sigma uses a second rejection pass. Sum and Average use the same coverage-aware accumulators.
+- Dark frames are combined into a master dark and used for defect correction.
+- Foreground protection uses a separate camera-fixed stack and a temporal mask when no mask file is supplied.
+- Optional finishing stages provide background-gradient removal, HDR tone mapping, star contrast, chroma/luminance denoise, auto brightness, and chromatic-aberration correction.
 
-- Per-pixel coverage normalization fixes the drifting-edge defect. A missing warped pixel is never treated as a black exposure.
-- The chronological middle frame is the reference, reducing maximum drift on both sides.
-- Defect-resistant coarse registration followed by native-resolution subpixel refinement prevents RAW hot pixels from winning the solve while keeping edge stars precise.
-- Registration residuals are measured in native pixels across the full field. Bad edge residuals, weak spatial coverage, and implausible transforms reject a frame.
-- **Average**, robust coverage-compensated **Sum**, and two-pass **Sigma** stacking modes are available.
-- Sum and Sigma run an exact second rejection pass, so fixed defects cannot become colored arcs after sky alignment.
-- Dark calibration finds defects repeated across the supplied darks and subtracts their shared fixed pattern.
-- Foreground protection makes a separate two-pass camera-fixed stack. The automatic mask uses the full sequence plus opposite drift directions, stays ground-connected, preserves sky holes, and saves beside the result for inspection.
-- Optional light-pollution gradient removal, HDR tone compression, star enhancement, halo-safe adaptive luminance/chroma denoising, auto brightness, and common-coverage cropping are included.
-- RAW decoding stays linear until the finishing stage, and master dark calibration happens before alignment.
-
-The safe defaults are full resolution, 98% common coverage, robust stacking, auto brightness, and mild dynamic denoise. Light-pollution removal, HDR, and star enhancement are opt-in because combining aggressive finishing stages can amplify noise and edge gradients. Half resolution is only a fast preview option.
+Default settings are native resolution, 98% common coverage, Sigma stacking, auto brightness, foreground protection, HDR, star enhancement, chromatic-aberration correction, registration correction, and dynamic denoise. Light-pollution reduction is off by default.
 
 ## Command line
 
@@ -36,40 +32,41 @@ The safe defaults are full resolution, 98% common coverage, robust stacking, aut
 .\.venv\Scripts\python.exe -m astrostack `
   --lights test-dataset\lights `
   --darks test-dataset\darks `
-  --output output\astrostack_improved.tiff `
+  --output output\astrostack.tiff `
   --mode sigma
 ```
 
-Use `python -m astrostack --help` for individual feature switches. Add `--half-size` only for a fast preview. A custom foreground mask is a grayscale image where white means camera-fixed foreground and black means sky; passing `--mask` enables the separate foreground stack.
+Use `python -m astrostack --help` for all switches. Add `--half-size` only for a preview.
+
+## Web app
+
+The `docs/` folder is a static GitHub Pages site. It runs the same Python/OpenCV/SciPy pipeline through Pyodide in a Web Worker.
+
+- RAW/DNG/CR2/CR3/NEF/ARW-family files are decoded in the browser with LibRaw WASM.
+- Decoding produces 16-bit RGB with a linear tone curve; PNG conversion is not required.
+- Files are not uploaded to a server.
+- Native mode keeps the source dimensions. Mobile-safe and Quick preview reduce the working dimensions after RAW decoding.
+- The first run downloads and caches the Python runtime and packages.
+
+To publish with GitHub Pages, select **Settings -> Pages -> Deploy from a branch**, choose the default branch, and set the folder to `/docs`.
 
 ## Project map
 
-- `astrostack/alignment.py`: star detection, asterism matching, RANSAC, and warping
-- `astrostack/stacking.py`: coverage-aware accumulators, two-pass rejection, masking, and cropping
-- `astrostack/calibration.py`: dark calibration and bad-pixel repair
-- `astrostack/postprocess.py`: gradient removal, HDR, denoise, star enhancement, and stretch
-- `astrostack/pipeline.py`: memory-bounded orchestration and frame rejection
-- `astrostack/gui.py`: threaded Tk desktop app
-- `tests/`: synthetic registration, edge-coverage, rejection, and finishing tests
+- `astrostack/alignment.py` - star detection, matching, RANSAC, and warping
+- `astrostack/stacking.py` - coverage-aware accumulators and rejection
+- `astrostack/calibration.py` - dark calibration and bad-pixel repair
+- `astrostack/postprocess.py` - gradient removal, HDR, denoise, enhancement, and stretch
+- `astrostack/pipeline.py` - frame preparation and orchestration
+- `astrostack/gui.py` - Tk desktop interface
+- `docs/` - browser interface and worker bridge
+- `tests/` - registration, coverage, rejection, and finishing tests
 
-## Supplied-dataset validation
-
-The included 42-frame set completes in Sigma mode with spatially verified registration and strict common-coverage cropping. Full-resolution validation output and its coverage map are written in `output/`.
-
-Run the regression suite with:
+## Tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-## Android note
+## Decompiled material
 
-This is currently a Windows desktop app. The processing modules are the usable reference implementation for an Android port, but rebuilding the friend's exact Android app still requires the original Gradle project and its native ABI libraries. See `DECOMPILATION_NOTES.md` for the evidence.
-
-## Mobile web app
-
-The `docs/` folder is a static, offline-first browser build for GitHub Pages. It keeps the stack local to the phone, uses a Web Worker for alignment and finishing, caches the app shell, and exports a PNG without a server.
-
-To publish it, push the repository to GitHub and choose **Settings -> Pages -> Deploy from a branch**, then select the default branch and the `/docs` folder. Open the resulting Pages URL on the phone and use **Install** when the browser offers it.
-
-The web build includes a bundled LibRaw WebAssembly decoder for DNG/CR2/NEF/ARW-family inputs. RAW files are decoded locally to 16-bit RGB with automatic brightness disabled and a linear tone curve before stacking, so conversion to PNG is not required. The browser now runs the same Python/OpenCV/SciPy pipeline from `astrostack/` through Pyodide; the old JavaScript approximation is no longer used for registration, stacking, masking, or finishing. The first stack downloads and caches the Python runtime and packages. Large native-resolution sets can still exceed a phone's memory; Mobile-safe mode reduces the working dimensions after RAW decoding.
+The files in `sources/` are JADX output from the supplied APK. They are not a buildable Android project. See [DECOMPILATION_NOTES.md](DECOMPILATION_NOTES.md) for the evidence and the requirements for an Android port.

@@ -1,13 +1,19 @@
-# AstroStack Local web app
+# AstroStack web app
 
-This is a static GitHub Pages build. It processes browser-readable image files locally and caches the app shell with a service worker.
+Static GitHub Pages build for local astrophotography stacking. The interface runs the Python/OpenCV/SciPy pipeline in a Web Worker and caches the app shell.
 
-The browser pipeline includes sigma/sum/average stacking, dark-frame calibration, full-field star registration, common-coverage cropping, foreground protection, auto brightness, light-pollution reduction, HDR tone mapping, star enhancement, adaptive chroma/luminance denoise, and chromatic-aberration correction. Processing runs in a Web Worker so the mobile UI stays responsive. RAW/DNG/CR2/NEF/ARW-family inputs are decoded in-browser with the bundled LibRaw WebAssembly build before the same Python/OpenCV/SciPy pipeline used by the desktop app runs through Pyodide. The first stack downloads the Python runtime and packages; the browser cache keeps them for subsequent use.
+## Supported input
 
-## Publish with GitHub Pages
+JPG, PNG, DNG, CR2, CR3, NEF, ARW, RW2, ORF, RAF, and other LibRaw-supported camera files can be selected directly. RAW files are decoded in the browser with LibRaw WASM to 16-bit RGB with a linear tone curve. No pre-conversion to PNG is required.
 
-Set **Settings → Pages → Deploy from a branch**, choose the repository's default branch, and choose `/docs` as the folder. The app uses relative URLs so it works from a project subpath.
+## Processing options
 
-## Input note
+Sigma, Sum, and Average stacking; dark calibration; star registration; common-coverage cropping; foreground protection; auto brightness; light-pollution reduction; HDR tone mapping; star enhancement; dynamic denoise; chromatic-aberration correction; and registration-distortion correction.
 
-RAW/DNG/CR2/NEF/ARW-family files are decoded locally with LibRaw WASM. The decoder demosaics to 16-bit RGB with camera white balance, no automatic brightness, and a linear tone curve before the stacker applies its own finishing controls. Large RAW sets can use substantial phone memory; Mobile-safe or Quick preview reduces the working dimensions after decoding, without requiring a pre-converted file. Native mode is automatically bounded for very large frame sets so the Python worker does not materialize an impossible full-resolution frame cube.
+Native resolution keeps the decoded source dimensions and streams one RAW frame at a time. Mobile-safe and Quick preview reduce the working dimensions after decoding. Native-resolution sets can require substantial phone memory.
+
+## Deploy
+
+In GitHub, open **Settings -> Pages**, choose **Deploy from a branch**, select the default branch, and set the folder to `/docs`. The app uses relative URLs, so it works from a project subpath.
+
+The first stack downloads the Pyodide runtime and packages. Later runs use the browser cache. Frames and results stay on the device; there is no upload endpoint.

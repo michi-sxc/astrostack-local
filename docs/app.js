@@ -97,7 +97,7 @@ function renderFiles() {
   const hasRaw = files.some(({ file }) => isRaw(file));
   const notice = $('formatNotice');
   notice.hidden = !hasRaw;
-  if (hasRaw) notice.textContent = 'RAW/DNG inputs stay RAW until local LibRaw decoding. The validated Python/OpenCV stacker then runs in a worker; large native-resolution sets can use substantial phone memory.';
+  if (hasRaw) notice.textContent = 'RAW/DNG files are decoded locally with LibRaw. No PNG conversion is needed. Native-resolution stacks can use substantial phone memory.';
 }
 
 function addFiles(target, files) {
@@ -134,10 +134,10 @@ function resetFinish() {
 function updateMemoryHint() {
   const mode = $('resolution').value;
   $('memoryHint').textContent = mode === 'full'
-    ? 'Native mode keeps source dimensions and streams one RAW frame at a time. It uses more phone memory than a preview, but never silently downsizes the stack.'
+    ? 'Native mode keeps source dimensions and streams one RAW frame at a time.'
     : mode === 'mobile'
-      ? 'Mobile-safe caps the long edge at 1800 px while keeping the full processing pipeline.'
-      : 'Quick preview caps the long edge at 1100 px for fast tuning before a native export.';
+      ? 'Mobile-safe caps the long edge at 1800 px.'
+      : 'Quick preview caps the long edge at 1100 px.';
 }
 
 function appendLog(message) { log(message); }
@@ -187,7 +187,7 @@ function handleWorkerMessage(event) {
     $('progressBar').style.width = '100%';
     $('progressPercent').textContent = '100%';
     setStatus('Complete', 'done');
-    log('Finished locally. Your source frames were not uploaded.', 'success');
+    log('Finished. Files stayed in this browser.', 'success');
   } else if (message.type === 'error') {
     state.running = false;
     $('processButton').disabled = false;

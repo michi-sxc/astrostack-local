@@ -1,10 +1,10 @@
 {
-  "name": "AstroStack Local",
+  "name": "AstroStack",
   "short_name": "AstroStack",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#07101d",
-  "theme_color": "#08111f",
-  "description": "Offline-first astrophotography stacking in your browser.",
+  "background_color": "#f2f3f5",
+  "theme_color": "#f2f3f5",
+  "description": "Local RAW astrophotography stacking tool.",
   "icons": [{"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
 }

@@ -108,6 +108,7 @@ async function decodeRaw(file, maxSide = 0, target = null) {
   }
 }
 
+// legacy JS math below stays dormant; Python owns registration and finishing
 function gray(frame) {
   const out = new Float32Array(frame.w * frame.h);
   for (let i = 0, p = 0; i < out.length; i++, p += 3) out[i] = luminance(frame.data[p], frame.data[p + 1], frame.data[p + 2]);
@@ -438,6 +439,14 @@ function cropByCoverage(data, w, h, count, required) {
   return { data: out, w: cw, h: bottom - top + 1, cropped: true };
 }
 
+let pythonWorker = null;
+
+function ensurePythonWorker() {
+  if (pythonWorker) return pythonWorker;
+  pythonWorker = new Worker(new URL('./python_worker.js', import.meta.url), { type: 'module' });
+  return pythonWorker;
+}
+
 async function run(job) {
   const options = job.settings || {};
   const maxSide = options.resolution === 'mobile' ? 1800 : options.resolution === 'preview' ? 1100 : 0;
@@ -445,65 +454,45 @@ async function run(job) {
   const first = await decode(job.lights[0], maxSide);
   const target = { w: first.w, h: first.h };
   const lights = [first];
-  for (let i = 1; i < job.lights.length; i++) { lights.push(await decode(job.lights[i], maxSide, target)); progress(`Decoding light ${i + 1}/${job.lights.length}`, 3 + (i / job.lights.length) * 12); }
-  note(`${lights.length} light frame${lights.length === 1 ? '' : 's'} loaded at ${target.w} × ${target.h}.`);
-  const rawCount = job.lights.filter((file) => RAW_EXT.test(file.name)).length;
-  if (rawCount) note(`${rawCount} RAW frame${rawCount === 1 ? '' : 's'} decoded locally with LibRaw at 16-bit, auto-brightness disabled.`);
-  let darkMaster = null;
-  if (job.darks?.length) {
-    progress('Building dark master', 18);
-    const sum = new Float32Array(target.w * target.h * 3);
-    for (const file of job.darks) { const dark = await decode(file, maxSide, target); for (let i = 0; i < sum.length; i++) sum[i] += dark.data[i]; }
-    for (let i = 0; i < sum.length; i++) sum[i] /= job.darks.length;
-    darkMaster = sum;
-    note(`${job.darks.length} dark frame${job.darks.length === 1 ? '' : 's'} averaged before stacking.`);
+  for (let i = 1; i < job.lights.length; i++) {
+    lights.push(await decode(job.lights[i], maxSide, target));
+    progress(`Decoding light ${i + 1}/${job.lights.length}`, 3 + (i / job.lights.length) * 12);
   }
-  lights.forEach((frame) => applyCalibration(frame, darkMaster));
-  const reference = lights[Math.floor(lights.length / 2)];
-  const referenceGray = gray(reference);
-  const skySum = new Float32Array(target.w * target.h * 3), skyCount = new Float32Array(target.w * target.h), skyMean = new Float32Array(target.w * target.h), skyM2 = new Float32Array(target.w * target.h);
-  const fgSum = new Float32Array(skySum.length), fgCount = new Float32Array(skyCount.length), fgMean = new Float32Array(skyCount.length), fgM2 = new Float32Array(skyCount.length);
-  const rawMean = new Float32Array(skyCount.length), rawM2 = new Float32Array(skyCount.length);
-  for (let frameIndex = 0; frameIndex < lights.length; frameIndex++) {
-    const frame = lights[frameIndex];
-    const raw = gray(frame);
-    for (let i = 0; i < raw.length; i++) { const n = frameIndex + 1, delta = raw[i] - rawMean[i]; rawMean[i] += delta / n; rawM2[i] += delta * (raw[i] - rawMean[i]); }
-    const transform = frameIndex === Math.floor(lights.length / 2) ? { angle: 0, cos: 1, sin: 0, dx: 0, dy: 0, score: 1 } : findTransform({ ...reference, data: referenceGray }, { ...frame, data: raw }, Boolean(options.distortion));
-    if (frameIndex > 0) note(`Registered light ${frameIndex + 1}/${lights.length} · ${transform.angle ? `${(transform.angle * 180 / Math.PI).toFixed(2)}°` : 'translation'} · score ${transform.score.toFixed(3)}`);
-    const warped = frameIndex === Math.floor(lights.length / 2) ? { ...frame, valid: new Uint8Array(skyCount.length).fill(1) } : warp(frame, transform);
-    addFrame(skySum, skyCount, skyMean, skyM2, warped, warped.valid, options.mode || 'sigma');
-    // foreground stays in camera coordinates, so never warp it
-    addFrame(fgSum, fgCount, fgMean, fgM2, frame, new Uint8Array(skyCount.length).fill(1), 'sigma');
-    progress(`Registering frame ${frameIndex + 1}/${lights.length}`, 22 + ((frameIndex + 1) / lights.length) * 48);
-  }
-  const sky = finish(skySum, skyCount, options.mode || 'sigma');
-  const foreground = finish(fgSum, fgCount, 'average');
+  const darks = [];
+  for (const file of job.darks || []) darks.push(await decode(file, maxSide, target));
   let mask = null;
-  if (options.protectForeground) {
-    if (job.mask) mask = maskFromImage(await decode(job.mask, maxSide, null, true), target.w, target.h);
-    else mask = makeAutoMask(rawM2, target.w, target.h);
-    note(job.mask ? 'Soft foreground mask loaded and feathered.' : 'Auto foreground mask estimated from temporal stability. A custom mask is best for complex horizons.');
-  } else mask = new Float32Array(skyCount.length);
-  const composite = new Float32Array(sky.length);
-  for (let i = 0; i < skyCount.length; i++) {
-    const p = i * 3, alpha = mask[i];
-    const fgLum = luminance(foreground[p], foreground[p + 1], foreground[p + 2]);
-    const refLum = luminance(reference.data[p], reference.data[p + 1], reference.data[p + 2]);
-    const lift = refLum - fgLum;
-    const sr = Math.max(0, foreground[p] + lift), sg = Math.max(0, foreground[p + 1] + lift), sb = Math.max(0, foreground[p + 2] + lift);
-    composite[p] = sky[p] * (1 - alpha) + sr * alpha;
-    composite[p + 1] = sky[p + 1] * (1 - alpha) + sg * alpha;
-    composite[p + 2] = sky[p + 2] * (1 - alpha) + sb * alpha;
-  }
-  progress('Finishing color and detail', 76);
-  postProcess(composite, target.w, target.h, options, mask);
-  const requiredCoverage = Math.max(1, Math.ceil(lights.length * (Number(options.coverage) || 98) / 100));
-  const cropped = cropByCoverage(composite, target.w, target.h, skyCount, requiredCoverage);
-  if (cropped.cropped) note(`Auto-cropped edge pixels below ${options.coverage || 98}% common coverage.`);
-  progress('Encoding PNG preview', 96);
-  const output = toOutput(cropped.data);
-  note(`Coverage target ${options.coverage || 98}% · output ${cropped.w} × ${cropped.h}.`);
-  return { width: cropped.w, height: cropped.h, buffer: output.buffer };
+  if (job.mask) mask = await decode(job.mask, maxSide, target, true);
+  note(`${lights.length} light frame${lights.length === 1 ? '' : 's'} decoded at ${target.w} × ${target.h}.`);
+  const rawCount = job.lights.filter((file) => RAW_EXT.test(file.name)).length;
+  if (rawCount) note(`${rawCount} RAW frame${rawCount === 1 ? '' : 's'} decoded locally with LibRaw at 16-bit, linear tone.`);
+
+  const payload = {
+    type: 'processDecoded',
+    settings: options,
+    lights: lights.map((frame) => ({ w: frame.w, h: frame.h, buffer: frame.data.buffer })),
+    darks: darks.map((frame) => ({ w: frame.w, h: frame.h, buffer: frame.data.buffer })),
+    mask: mask ? { w: mask.w, h: mask.h, buffer: mask.data.buffer } : null,
+  };
+  const transfer = [...payload.lights, ...payload.darks, ...(payload.mask ? [payload.mask] : [])].map((item) => item.buffer);
+  const child = ensurePythonWorker();
+  return await new Promise((resolve, reject) => {
+    const onMessage = (event) => {
+      const message = event.data || {};
+      if (message.type === 'progress') progress(message.label, message.percent);
+      else if (message.type === 'log') note(message.message);
+      else if (message.type === 'pythonDone') {
+        child.removeEventListener('message', onMessage);
+        const image = new Float32Array(message.buffer);
+        const output = toOutput(image);
+        resolve({ width: message.width, height: message.height, buffer: output.buffer });
+      } else if (message.type === 'error') {
+        child.removeEventListener('message', onMessage);
+        reject(new Error(message.message));
+      }
+    };
+    child.addEventListener('message', onMessage);
+    child.postMessage(payload, transfer);
+  });
 }
 
 self.onmessage = async (event) => {

@@ -87,7 +87,7 @@
             <label class="select-control"><span>Processing resolution</span><select id="resolution"><option value="full" selected>Native resolution</option><option value="mobile">Mobile-safe preview (up to 1800 px)</option><option value="preview">Quick preview (up to 1100 px)</option></select></label>
             <label class="range-control"><span>Minimum common coverage <output id="coverageValue">98%</output></span><input id="coverage" type="range" min="75" max="100" value="98" step="1"></label>
           </div>
-          <div id="memoryHint" class="memory-hint">Native mode keeps source dimensions. On a phone, use Mobile-safe if the browser warns about memory.</div>
+          <div id="memoryHint" class="memory-hint">Native mode keeps source dimensions. The validated Python/OpenCV engine loads on first run; use Mobile-safe if the browser warns about memory.</div>
         </section>
 
         <section class="panel results-panel" aria-labelledby="resultsHeading">

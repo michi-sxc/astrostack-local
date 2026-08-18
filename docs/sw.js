@@ -1,5 +1,12 @@
-const CACHE = 'astrostack-local-v4';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './worker.js', './manifest.webmanifest', './icon.svg', './vendor/libraw/index.js', './vendor/libraw/worker.js', './vendor/libraw/libraw.js', './vendor/libraw/libraw.wasm'];
+const CACHE = 'astrostack-local-v5';
+const SHELL = [
+  './', './index.html', './styles.css', './app.js', './worker.js', './python_worker.js',
+  './manifest.webmanifest', './icon.svg',
+  './vendor/libraw/index.js', './vendor/libraw/worker.js', './vendor/libraw/libraw.js', './vendor/libraw/libraw.wasm',
+  './pycore/astrostack/__init__.py', './pycore/astrostack/alignment.py', './pycore/astrostack/calibration.py',
+  './pycore/astrostack/io.py', './pycore/astrostack/models.py', './pycore/astrostack/pipeline.py',
+  './pycore/astrostack/postprocess.py', './pycore/astrostack/stacking.py', './pycore/astrostack/web.py',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));

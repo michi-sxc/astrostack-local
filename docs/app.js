@@ -97,7 +97,7 @@ function renderFiles() {
   const hasRaw = files.some(({ file }) => isRaw(file));
   const notice = $('formatNotice');
   notice.hidden = !hasRaw;
-  if (hasRaw) notice.textContent = 'RAW/DNG inputs are decoded locally with the bundled LibRaw WASM engine. Large native-resolution sets can use substantial phone memory.';
+  if (hasRaw) notice.textContent = 'RAW/DNG inputs stay RAW until local LibRaw decoding. The validated Python/OpenCV stacker then runs in a worker; large native-resolution sets can use substantial phone memory.';
 }
 
 function addFiles(target, files) {
@@ -134,7 +134,7 @@ function resetFinish() {
 function updateMemoryHint() {
   const mode = $('resolution').value;
   $('memoryHint').textContent = mode === 'full'
-    ? 'Native mode keeps source dimensions. On a phone, use Mobile-safe if the browser warns about memory.'
+    ? 'Native mode keeps source dimensions. The validated Python/OpenCV engine loads on first run; use Mobile-safe if the browser warns about memory.'
     : mode === 'mobile'
       ? 'Mobile-safe caps the long edge at 1800 px while keeping the full processing pipeline.'
       : 'Quick preview caps the long edge at 1100 px for fast tuning before a native export.';

@@ -2,7 +2,7 @@
 
 This is a static GitHub Pages build. It processes browser-readable image files locally and caches the app shell with a service worker.
 
-The browser pipeline includes sigma/sum/average stacking, dark-frame averaging, translation plus small-rotation registration, common-coverage cropping, foreground protection, auto brightness, light-pollution reduction, HDR tone mapping, star enhancement, adaptive chroma/luminance denoise, and chromatic-aberration correction. Processing runs in a Web Worker so the mobile UI stays responsive. RAW/DNG/CR2/NEF/ARW-family inputs are decoded in-browser with the bundled LibRaw WebAssembly build before stacking.
+The browser pipeline includes sigma/sum/average stacking, dark-frame calibration, full-field star registration, common-coverage cropping, foreground protection, auto brightness, light-pollution reduction, HDR tone mapping, star enhancement, adaptive chroma/luminance denoise, and chromatic-aberration correction. Processing runs in a Web Worker so the mobile UI stays responsive. RAW/DNG/CR2/NEF/ARW-family inputs are decoded in-browser with the bundled LibRaw WebAssembly build before the same Python/OpenCV/SciPy pipeline used by the desktop app runs through Pyodide. The first stack downloads the Python runtime and packages; the browser cache keeps them for subsequent use.
 
 ## Publish with GitHub Pages
 

@@ -1,11 +1,11 @@
-const CACHE = 'astrostack-local-v6';
+const CACHE = 'astrostack-local-v7';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './worker.js', './python_worker.js',
   './manifest.webmanifest', './icon.svg',
   './vendor/libraw/index.js', './vendor/libraw/worker.js', './vendor/libraw/libraw.js', './vendor/libraw/libraw.wasm',
   './pycore/astrostack/__init__.py', './pycore/astrostack/alignment.py', './pycore/astrostack/calibration.py',
   './pycore/astrostack/io.py', './pycore/astrostack/models.py', './pycore/astrostack/pipeline.py',
-  './pycore/astrostack/postprocess.py', './pycore/astrostack/stacking.py', './pycore/astrostack/web.py',
+  './pycore/astrostack/postprocess.py', './pycore/astrostack/stacking.py', './pycore/astrostack/streaming.py', './pycore/astrostack/web.py',
 ];
 
 self.addEventListener('install', (event) => {

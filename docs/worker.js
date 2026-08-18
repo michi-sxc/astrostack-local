@@ -450,72 +450,119 @@ let pythonWorker = null;
 
 function ensurePythonWorker() {
   if (pythonWorker) return pythonWorker;
-  pythonWorker = new Worker(new URL('./python_worker.js?v=310bde9', import.meta.url), { type: 'module' });
+  pythonWorker = new Worker(new URL('./python_worker.js?v=stream311', import.meta.url), { type: 'module' });
   return pythonWorker;
 }
 
-async function run(job) {
-  const options = job.settings || {};
-  const maxSide = options.resolution === 'mobile' ? 1800 : options.resolution === 'preview' ? 1100 : 0;
-  let workingSide = maxSide;
-  if (!workingSide && job.lights.length > 8) {
-    workingSide = job.lights.length > 20 ? 1100 : 1800;
-    note(`Native resolution is too large for this browser frame count; using a ${workingSide}px working set to avoid exhausting memory.`);
-  }
-  progress('Decoding light frames', 3);
-  const first = await decode(job.lights[0], workingSide);
-  const target = { w: first.w, h: first.h };
-  const lights = [packFrame(first)];
-  first.data = null;
-  for (let i = 1; i < job.lights.length; i++) {
-    const frame = await decode(job.lights[i], workingSide, target);
-    lights.push(packFrame(frame));
-    frame.data = null;
-    progress(`Decoding light ${i + 1}/${job.lights.length}`, 3 + (i / job.lights.length) * 12);
-  }
-  const darks = [];
-  for (const file of job.darks || []) {
-    const frame = await decode(file, workingSide, target);
-    darks.push(packFrame(frame));
-    frame.data = null;
-  }
-  let mask = null;
-  if (job.mask) {
-    const decodedMask = await decode(job.mask, workingSide, target, true);
-    mask = packFrame(decodedMask);
-    decodedMask.data = null;
-  }
-  note(`${lights.length} light frame${lights.length === 1 ? '' : 's'} decoded at ${target.w} × ${target.h}.`);
-  const rawCount = job.lights.filter((file) => RAW_EXT.test(file.name)).length;
-  if (rawCount) note(`${rawCount} RAW frame${rawCount === 1 ? '' : 's'} decoded locally with LibRaw at 16-bit, linear tone.`);
-
-  const payload = {
-    type: 'processDecoded',
-    settings: options,
-    lights: lights.map((frame) => ({ w: frame.w, h: frame.h, dtype: 'uint16', buffer: frame.data.buffer })),
-    darks: darks.map((frame) => ({ w: frame.w, h: frame.h, dtype: 'uint16', buffer: frame.data.buffer })),
-    mask: mask ? { w: mask.w, h: mask.h, channels: 1, dtype: 'uint16', buffer: mask.data.buffer } : null,
-  };
-  const transfer = [...payload.lights, ...payload.darks, ...(payload.mask ? [payload.mask] : [])].map((item) => item.buffer);
-  const child = ensurePythonWorker();
-  return await new Promise((resolve, reject) => {
+function pythonRequest(child, payload, transfer = [], expected = ['streamReady']) {
+  return new Promise((resolve, reject) => {
     const onMessage = (event) => {
       const message = event.data || {};
       if (message.type === 'progress') progress(message.label, message.percent);
       else if (message.type === 'log') note(message.message);
-      else if (message.type === 'pythonDone') {
+      else if (message.type === 'error') {
         child.removeEventListener('message', onMessage);
-        const image = new Float32Array(message.buffer);
-        const output = toOutput(image);
-        resolve({ width: message.width, height: message.height, buffer: output.buffer });
-      } else if (message.type === 'error') {
+        reject(new Error(message.message || 'Python processing failed'));
+      } else if (expected.includes(message.type)) {
         child.removeEventListener('message', onMessage);
-        reject(new Error(message.message));
+        resolve(message);
       }
     };
     child.addEventListener('message', onMessage);
     child.postMessage(payload, transfer);
   });
+}
+
+async function run(job) {
+  const options = job.settings || {};
+  const maxSide = options.resolution === 'mobile' ? 1800 : options.resolution === 'preview' ? 1100 : 0;
+  // Match Python's acquisition ordering before choosing the middle reference.
+  const lights = [...job.lights].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const darkFiles = [...(job.darks || [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const referenceIndex = Math.floor(lights.length / 2);
+  progress('Decoding reference', 3);
+  const referenceFrame = await decode(lights[referenceIndex], maxSide);
+  const target = { w: referenceFrame.w, h: referenceFrame.h };
+  const reference = packFrame(referenceFrame);
+  referenceFrame.data = null;
+  const darks = [];
+  for (const file of darkFiles) {
+    const frame = await decode(file, maxSide, target);
+    const packed = packFrame(frame);
+    packed.channels = 3;
+    packed.dtype = 'uint16';
+    darks.push(packed);
+    frame.data = null;
+  }
+  let mask = null;
+  if (job.mask) {
+    const decodedMask = await decode(job.mask, maxSide, target, true);
+    mask = packFrame(decodedMask);
+    mask.channels = 1;
+    mask.dtype = 'uint16';
+    decodedMask.data = null;
+  }
+  note(`Native stream: ${lights.length} light frame${lights.length === 1 ? '' : 's'} at ${target.w} × ${target.h}; one frame is decoded at a time.`);
+  const rawCount = lights.filter((file) => RAW_EXT.test(file.name)).length;
+  if (rawCount) note(`${rawCount} RAW frame${rawCount === 1 ? '' : 's'} decoded locally with LibRaw at 16-bit, linear tone.`);
+
+  const child = ensurePythonWorker();
+  await pythonRequest(child, {
+    type: 'streamStart',
+    settings: options,
+    count: lights.length,
+    referenceIndex,
+    reference: { w: reference.w, h: reference.h, channels: 3, dtype: 'uint16', buffer: reference.data.buffer },
+    darks: darks.map((frame) => ({ w: frame.w, h: frame.h, channels: 3, dtype: 'uint16', buffer: frame.data.buffer })),
+    mask: mask ? { w: mask.w, h: mask.h, channels: 1, dtype: 'uint16', buffer: mask.data.buffer } : null,
+  }, [reference.data.buffer, ...darks.map((frame) => frame.data.buffer), ...(mask ? [mask.data.buffer] : [])]);
+
+  // Same nearest-to-middle bootstrap as the desktop pipeline.
+  const ordered = [...lights.keys()]
+    .filter((index) => index !== referenceIndex)
+    .sort((a, b) => Math.abs(a - referenceIndex) - Math.abs(b - referenceIndex));
+  for (let done = 0; done < ordered.length; done++) {
+    const index = ordered[done];
+    const frame = await decode(lights[index], maxSide, target);
+    const packed = packFrame(frame);
+    frame.data = null;
+    await pythonRequest(child, {
+      type: 'streamFrame', stage: 'first', index,
+      frame: { w: packed.w, h: packed.h, channels: 3, dtype: 'uint16', buffer: packed.data.buffer },
+    }, [packed.data.buffer]);
+    progress(`Aligning and stacking ${done + 1}/${ordered.length}`, 8 + ((done + 1) / Math.max(1, ordered.length)) * 48);
+  }
+  const firstPass = await pythonRequest(child, { type: 'streamFirstDone' }, [], ['streamFirstReady']);
+  const probeIndices = firstPass.indices || [];
+  for (let done = 0; done < probeIndices.length; done++) {
+    const index = probeIndices[done];
+    const frame = await decode(lights[index], maxSide, target);
+    const packed = packFrame(frame);
+    frame.data = null;
+    await pythonRequest(child, {
+      type: 'streamFrame', stage: 'probe', index,
+      frame: { w: packed.w, h: packed.h, channels: 3, dtype: 'uint16', buffer: packed.data.buffer },
+    }, [packed.data.buffer]);
+  }
+  await pythonRequest(child, { type: 'streamProbeDone' });
+  const accepted = firstPass.accepted || [];
+  for (let done = 0; done < accepted.length; done++) {
+    const index = accepted[done];
+    if (index === referenceIndex) continue;
+    const frame = await decode(lights[index], maxSide, target);
+    const packed = packFrame(frame);
+    frame.data = null;
+    await pythonRequest(child, {
+      type: 'streamFrame', stage: 'second', index,
+      frame: { w: packed.w, h: packed.h, channels: 3, dtype: 'uint16', buffer: packed.data.buffer },
+    }, [packed.data.buffer]);
+    progress(`Robust rejection pass ${done + 1}/${Math.max(1, accepted.length - 1)}`, 60 + ((done + 1) / Math.max(1, accepted.length)) * 28);
+  }
+  const result = await pythonRequest(child, { type: 'streamFinish' }, [], ['pythonDone']);
+  const image = new Float32Array(result.buffer);
+  const output = toOutput(image);
+  return { width: result.width, height: result.height, buffer: output.buffer };
+
 }
 
 self.onmessage = async (event) => {

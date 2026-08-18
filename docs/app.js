@@ -134,7 +134,7 @@ function resetFinish() {
 function updateMemoryHint() {
   const mode = $('resolution').value;
   $('memoryHint').textContent = mode === 'full'
-    ? 'Native mode keeps source dimensions for small sets. Large sets are automatically capped in-browser to protect phone memory.'
+    ? 'Native mode keeps source dimensions and streams one RAW frame at a time. It uses more phone memory than a preview, but never silently downsizes the stack.'
     : mode === 'mobile'
       ? 'Mobile-safe caps the long edge at 1800 px while keeping the full processing pipeline.'
       : 'Quick preview caps the long edge at 1100 px for fast tuning before a native export.';
@@ -144,7 +144,7 @@ function appendLog(message) { log(message); }
 
 function ensureWorker() {
   if (!state.worker) {
-    state.worker = new Worker('./worker.js?v=310bde9', { type: 'module' });
+    state.worker = new Worker('./worker.js?v=stream311', { type: 'module' });
     state.worker.onmessage = handleWorkerMessage;
     state.worker.onerror = (event) => {
       state.running = false;

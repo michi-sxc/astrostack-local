@@ -66,7 +66,3 @@ To publish with GitHub Pages, select **Settings -> Pages -> Deploy from a branch
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
-
-## Decompiled material
-
-The files in `sources/` are JADX output from the supplied APK. They are not a buildable Android project. See [DECOMPILATION_NOTES.md](DECOMPILATION_NOTES.md) for the evidence and the requirements for an Android port.

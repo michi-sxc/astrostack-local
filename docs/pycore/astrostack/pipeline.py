@@ -42,13 +42,15 @@ def _match_exposure(
     reference: np.ndarray,
     foreground: np.ndarray | None,
     reference_luminance: np.ndarray | None = None,
+    reference_sample: np.ndarray | None = None,
 ) -> np.ndarray:
-    ref_lum = luminance(reference) if reference_luminance is None else reference_luminance
     cur_lum = luminance(frame)
-    valid = np.ones(ref_lum.shape, bool) if foreground is None else foreground < 0.25
+    valid = np.ones(frame.shape[:2], bool) if foreground is None else foreground < 0.25
     # Sparse sampling is plenty for robust photometric normalization.
     stride = max(1, int(np.sqrt(valid.size / 250_000)))
-    ref_sample = ref_lum[::stride, ::stride][valid[::stride, ::stride]]
+    if reference_sample is None:
+        ref_lum = luminance(reference) if reference_luminance is None else reference_luminance
+        reference_sample = ref_lum[::stride, ::stride][valid[::stride, ::stride]]
     cur_sample = cur_lum[::stride, ::stride][valid[::stride, ::stride]]
     if len(ref_sample) < 100:
         return frame
@@ -66,11 +68,19 @@ def _prepare_frame(
     size: tuple[int, int],
     foreground: np.ndarray | None,
     reference_luminance: np.ndarray | None = None,
+    reference_sample: np.ndarray | None = None,
 ) -> np.ndarray:
     frame = _read_source(path, request)
     if frame.shape != reference.shape:
         frame = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-    return _match_exposure(calibrate(frame, calibration), reference, foreground, reference_luminance)
+    return _match_exposure(calibrate(frame, calibration), reference, foreground, reference_luminance, reference_sample)
+
+
+def _exposure_reference_sample(reference: np.ndarray, foreground: np.ndarray | None) -> np.ndarray:
+    luminance_plane = luminance(reference)
+    valid = np.ones(luminance_plane.shape, bool) if foreground is None else foreground < 0.25
+    stride = max(1, int(np.sqrt(valid.size / 250_000)))
+    return luminance_plane[::stride, ::stride][valid[::stride, ::stride]]
 
 
 def _geometric_coverage(transform: SpatialTransform, source_shape: tuple[int, int], size: tuple[int, int]) -> np.ndarray:
@@ -156,7 +166,6 @@ def stack_images(request: StackRequest) -> StackResult:
     size = reference.shape[1], reference.shape[0]
     calibration = build_master_dark(darks, request.options.half_size, size, request.progress, request.frame_data)
     reference = calibrate(reference, calibration)
-    reference_luminance = luminance(reference)
     if calibration.dark_count:
         strategy = "dark subtraction and bad-pixel repair" if calibration.master_dark is not None else "bad-pixel repair"
         _log(request, f"Calibration: {strategy} from {calibration.dark_count} dark frame(s); chroma floor {calibration.dark_noise:.5f}")
@@ -170,6 +179,7 @@ def stack_images(request: StackRequest) -> StackResult:
         else:
             _log(request, "Foreground protection: temporal automatic mask")
     normalization_mask = foreground
+    reference_sample = _exposure_reference_sample(reference, normalization_mask)
     reference_field = prepare_reference(reference, request.options.max_alignment_side, normalization_mask)
 
     # Keep a complete sky estimate behind the foreground; alpha errors then reveal sky, not black holes.
@@ -196,7 +206,7 @@ def stack_images(request: StackRequest) -> StackResult:
     for completed, (_, path) in enumerate(ordered, 1):
         _notify(request, "Aligning and stacking", completed, len(ordered))
         try:
-            frame = _prepare_frame(path, request, reference, calibration, size, normalization_mask, reference_luminance)
+            frame = _prepare_frame(path, request, reference, calibration, size, normalization_mask, None, reference_sample)
             transform, stats = estimate_transform(
                 frame,
                 reference,
@@ -280,7 +290,7 @@ def stack_images(request: StackRequest) -> StackResult:
     if sky_clipped is not None or foreground_clipped is not None:
         for completed, path in enumerate(accepted, 1):
             _notify(request, "Robust rejection pass", completed, len(accepted))
-            frame = reference if path == reference_path else _prepare_frame(path, request, reference, calibration, size, normalization_mask, reference_luminance)
+            frame = reference if path == reference_path else _prepare_frame(path, request, reference, calibration, size, normalization_mask, None, reference_sample)
             if sky_clipped is not None:
                 aligned, validity = warp_frame(frame, transforms[path], size, source_validity)
                 validity *= frame_confidence[path]

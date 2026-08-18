@@ -450,7 +450,7 @@ let pythonWorker = null;
 
 function ensurePythonWorker() {
   if (pythonWorker) return pythonWorker;
-  pythonWorker = new Worker(new URL('./python_worker.js?v=stream312', import.meta.url), { type: 'module' });
+  pythonWorker = new Worker(new URL('./python_worker.js?v=stream313', import.meta.url), { type: 'module' });
   return pythonWorker;
 }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -15,6 +16,7 @@ from .pipeline import (
     _bottom_connected,
     _geometric_coverage,
     _neutralize_foreground,
+    _exposure_reference_sample,
     _prepare_frame,
 )
 from .postprocess import process_image
@@ -50,7 +52,7 @@ class StreamingStackSession:
         self.reference_path = self.light_paths[reference_index]
         self.reference_index = reference_index
         self.reference = np.asarray(reference, dtype=np.float32)
-        self.reference_luminance = luminance(self.reference)
+        self.reference_sample = None
         self.size = (self.reference.shape[1], self.reference.shape[0])
         frame_data = {path: frame for path, frame in zip(self.dark_paths, darks)}
         frame_data[self.reference_path] = self.reference
@@ -77,6 +79,7 @@ class StreamingStackSession:
         self.foreground = None if mask is None else np.asarray(mask, dtype=np.float32)
         self.auto_foreground = options.protect_foreground and mask is None
         self.normalization_mask = self.foreground
+        self.reference_sample = _exposure_reference_sample(self.reference, self.normalization_mask)
         self.reference_field = prepare_reference(self.reference, options.max_alignment_side, self.normalization_mask)
         self.source_validity = np.ones(self.reference.shape[:2], np.float32)
         self.robust_sky = options.mode in {StackMode.SIGMA_CLIPPED, StackMode.SUM}
@@ -86,9 +89,17 @@ class StreamingStackSession:
             else CoverageAccumulator(self.reference.shape, StackMode.AVERAGE)
         )
         self.accumulator.add(self.reference, self.source_validity)
-        self.foreground_moments = MomentAccumulator(self.reference.shape) if self.foreground is not None or self.auto_foreground else None
+        self.foreground_stat_shape = self.reference.shape
+        if self.auto_foreground:
+            stat_scale = min(1.0, 1200.0 / max(self.reference.shape[:2]))
+            self.foreground_stat_shape = (
+                max(1, int(round(self.reference.shape[0] * stat_scale))),
+                max(1, int(round(self.reference.shape[1] * stat_scale))),
+                self.reference.shape[2],
+            )
+        self.foreground_moments = MomentAccumulator(self.foreground_stat_shape) if self.foreground is not None or self.auto_foreground else None
         if self.foreground_moments is not None:
-            self.foreground_moments.add(self.reference, self.source_validity)
+            self._add_foreground_moment(self.reference)
         self.geometric_coverage = np.ones(self.reference.shape[:2], np.float32)
         self.accepted = [self.reference_path]
         self.rejected: dict[Path, str] = {}
@@ -110,6 +121,17 @@ class StreamingStackSession:
         if self.progress:
             self.progress(stage, current, total)
 
+    def _add_foreground_moment(self, frame: np.ndarray) -> None:
+        if self.foreground_moments is None:
+            return
+        if self.foreground_stat_shape == frame.shape:
+            self.foreground_moments.add(frame, self.source_validity)
+            return
+        height, width = self.foreground_stat_shape[:2]
+        reduced = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        validity = cv2.resize(self.source_validity, (width, height), interpolation=cv2.INTER_AREA)
+        self.foreground_moments.add(reduced, validity)
+
     def add_first(self, index: int, frame: np.ndarray) -> None:
         path = self.light_paths[index]
         if index == self.reference_index:
@@ -117,7 +139,7 @@ class StreamingStackSession:
         self._progress("Aligning and stacking", len(self.accepted), len(self.light_paths) - 1)
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, self.reference_luminance)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, None, self.reference_sample)
             transform, stats = estimate_transform(
                 prepared,
                 self.reference,
@@ -137,7 +159,7 @@ class StreamingStackSession:
             validity *= confidence
             self.accumulator.add(aligned, validity)
             if self.foreground_moments is not None:
-                self.foreground_moments.add(prepared, self.source_validity)
+                self._add_foreground_moment(prepared)
             self.geometric_coverage += _geometric_coverage(transform, prepared.shape[:2], self.size) * confidence
             self.accepted.append(path)
             self.alignment[path] = stats
@@ -166,6 +188,10 @@ class StreamingStackSession:
         self.accumulator = None
         if self.foreground_moments is not None:
             self.foreground_mean, self.foreground_deviation, self.foreground_target = self.foreground_moments.statistics()
+            if self.foreground_stat_shape != self.reference.shape:
+                size = self.reference.shape[1], self.reference.shape[0]
+                self.foreground_mean = cv2.resize(self.foreground_mean, size, interpolation=cv2.INTER_LINEAR)
+                self.foreground_deviation = cv2.resize(self.foreground_deviation, size, interpolation=cv2.INTER_LINEAR)
             if not self.auto_foreground:
                 self._make_clippers()
             self.foreground_moments = None
@@ -189,7 +215,7 @@ class StreamingStackSession:
             return
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, None, self.reference_luminance)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, None, None, self.reference_sample)
             aligned, _ = warp_frame(prepared, self.transforms[path], self.size)
             self.probe_candidates.append(estimate_foreground_mask(self.reference, prepared, aligned))
         finally:
@@ -226,7 +252,7 @@ class StreamingStackSession:
             return
         self.request.frame_data[path] = frame
         try:
-            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, self.reference_luminance)
+            prepared = _prepare_frame(path, self.request, self.reference, self.calibration, self.size, self.normalization_mask, None, self.reference_sample)
             aligned, validity = warp_frame(prepared, self.transforms[path], self.size, self.source_validity)
             validity *= self.frame_confidence[path]
             if self.sky_clipped is not None:
@@ -237,6 +263,7 @@ class StreamingStackSession:
             self.request.frame_data.pop(path, None)
 
     def finish(self) -> StackResult:
+        dark_noise = self.calibration.dark_noise
         # Reference must enter the second-pass clipper without another decode.
         if self.sky_clipped is not None:
             self.sky_clipped.add(self.reference, self.source_validity)
@@ -257,6 +284,24 @@ class StreamingStackSession:
             self._log(f"Robust foreground downweighting: {self.foreground_clipped.rejected_fraction:.2%} of samples")
             stacked = stacked * (1.0 - self.foreground[..., None]) + static_stack * self.foreground[..., None]
 
+        # drop multi-hundred-MB intermediates before native postprocess
+        alignment = dict(self.alignment)
+        self.sky_clipped = None
+        self.foreground_clipped = None
+        self.sky_mean = self.sky_deviation = self.sky_target = None
+        self.foreground_mean = self.foreground_deviation = self.foreground_target = None
+        self.reference_field = None
+        self.reference_sample = None
+        self.reference = None
+        self.calibration = None
+        self.base_stack = None
+        self.source_validity = None
+        self.request.frame_data.clear()
+        self.transforms.clear()
+        self.alignment.clear()
+        self.frame_confidence.clear()
+        gc.collect()
+
         crop = None
         if self.options.auto_crop and len(self.accepted) > 1:
             crop = largest_coverage_crop(self.geometric_coverage, self.options.min_coverage)
@@ -268,6 +313,6 @@ class StreamingStackSession:
                     self.foreground = self.foreground[y0:y1, x0:x1]
                 self._log(f"Coverage crop: {x1 - x0} x {y1 - y0} at {self.options.min_coverage:.0%} minimum")
         self._progress("Finishing image", 1, 1)
-        image = process_image(stacked, self.options, self.foreground, self.calibration.dark_noise)
+        image = process_image(stacked, self.options, self.foreground, dark_noise)
         self._log(f"Finished: {len(self.accepted)} accepted, {len(self.rejected)} rejected")
-        return StackResult(image, self.geometric_coverage, self.accepted, self.rejected, crop, self.alignment, self.foreground)
+        return StackResult(image, self.geometric_coverage, self.accepted, self.rejected, crop, alignment, self.foreground)

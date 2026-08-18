@@ -106,6 +106,9 @@ def prepare_reference(
     coarse_side = min(max_side, 1200)
     coarse = detect_stars(image, coarse_side, exclude_mask, max_stars=700)
     fine = coarse if max_side <= coarse_side else detect_stars(image, max_side, exclude_mask, max_stars=2000)
+    if fine is not coarse:
+        # fine matching only needs points; keep coarse detail for rare phase fallback
+        fine = StarField(fine.points, fine.shape, fine.scale, np.empty(0, np.float32))
     return AlignmentReference(coarse, fine, max_side)
 
 

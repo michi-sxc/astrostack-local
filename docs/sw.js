@@ -1,4 +1,4 @@
-const CACHE = 'astrostack-local-v8';
+const CACHE = 'astrostack-local-v9';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './worker.js', './python_worker.js',
   './manifest.webmanifest', './icon.svg',
